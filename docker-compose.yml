@@ -1,0 +1,24 @@
+services:
+  github-heartbeat-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: github-heartbeat-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - REPO_DIR=/app/repo
+    volumes:
+      # Persist the cloned repository and git index across container restarts
+      - bot-repo-data:/app/repo
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-repo-data:
+    driver: local

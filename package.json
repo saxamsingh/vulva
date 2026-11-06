@@ -1,0 +1,27 @@
+{
+  "name": "github-heartbeat-bot",
+  "version": "1.0.0",
+  "description": "Production-ready GitHub bot for automated heartbeat commits",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test:commit": "RUN_ON_STARTUP=true RUN_ONCE=true node index.js"
+  },
+  "keywords": [
+    "github",
+    "bot",
+    "heartbeat",
+    "auto-commit",
+    "git",
+    "automation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "node-cron": "^4.6.0",
+    "simple-git": "^4.0.2"
+  }
+}

@@ -1,0 +1,53 @@
+name: Automated Heartbeat Commit (Option A)
+
+on:
+  schedule:
+    # Trigger every 10 minutes
+    # Note: GitHub Actions scheduler queue might experience jitter during peak hours
+    - cron: '*/10 * * * *'
+  workflow_dispatch: # Enable manual run for immediate verification
+
+permissions:
+  contents: write # Required to push commits back to the repository
+
+concurrency:
+  group: heartbeat-workflow
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git Identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Pull Latest Changes
+        run: |
+          # Fetch and rebase to prevent race conditions or merge conflicts
+          git pull --rebase origin ${{ github.ref_name }} || true
+
+      - name: Append Heartbeat Entry
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          RUN_NUM="${{ github.run_number }}"
+          echo "[$TIMESTAMP] Heartbeat ping (GitHub Actions run #$RUN_NUM) | Status: OK" >> heartbeat.log
+
+      - name: Stage, Commit and Push
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          git add heartbeat.log
+          if git diff --staged --quiet; then
+            echo "No changes staged. Skipping commit."
+          else
+            git commit -m "chore(bot): automated heartbeat commit [$TIMESTAMP]"
+            git push origin HEAD:${{ github.ref_name }}
+            echo "Successfully pushed heartbeat commit for $TIMESTAMP"
+          fi
