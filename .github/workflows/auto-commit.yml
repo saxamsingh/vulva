@@ -2,9 +2,8 @@ name: Automated Heartbeat Commit (Option A)
 
 on:
   schedule:
-    # Trigger every 10 minutes
-    # Note: GitHub Actions scheduler queue might experience jitter during peak hours
-    - cron: '*/10 * * * *'
+    # Trigger every 10 minutes with a 4-minute offset to bypass GitHub top-of-hour queue congestion
+    - cron: '4,14,24,34,44,54 * * * *'
   workflow_dispatch: # Enable manual run for immediate verification
 
 permissions:
