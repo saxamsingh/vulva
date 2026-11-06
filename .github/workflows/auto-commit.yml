@@ -43,7 +43,7 @@ jobs:
       - name: Stage, Commit and Push
         run: |
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          git add heartbeat.log
+          git add -f heartbeat.log
           if git diff --staged --quiet; then
             echo "No changes staged. Skipping commit."
           else
