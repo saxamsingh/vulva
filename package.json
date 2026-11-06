@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "test:commit": "RUN_ON_STARTUP=true RUN_ONCE=true node index.js"
+    "test:commit": "node index.js --once"
   },
   "keywords": [
     "github",

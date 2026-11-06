@@ -87,7 +87,7 @@ export const config = {
   repoDir: path.resolve(process.cwd(), process.env.REPO_DIR || './repo'),
   logFileName: process.env.LOG_FILE_NAME || 'activity-log.txt',
   runOnStartup: process.env.RUN_ON_STARTUP === 'true' || process.env.RUN_ON_STARTUP === undefined,
-  runOnce: process.env.RUN_ONCE === 'true',
+  runOnce: process.env.RUN_ONCE === 'true' || process.argv.includes('--once') || process.argv.includes('--test'),
   maxRetries: parseInt(process.env.MAX_RETRIES || '3', 10),
   retryDelayMs: parseInt(process.env.RETRY_DELAY_MS || '2000', 10),
 
