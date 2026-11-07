@@ -83,7 +83,10 @@ export const config = {
   commitUsername: (process.env.COMMIT_USERNAME || 'heartbeat-bot').trim(),
 
   // Operational settings
-  cronSchedule: process.env.CRON_SCHEDULE || '*/10 * * * *', // Every 10 minutes default
+  randomInterval: process.env.RANDOM_INTERVAL !== 'false', // Default true: randomized natural intervals
+  minIntervalMinutes: parseInt(process.env.MIN_INTERVAL_MINUTES || '12', 10), // e.g. 12 mins minimum
+  maxIntervalMinutes: parseInt(process.env.MAX_INTERVAL_MINUTES || '35', 10), // e.g. 35 mins maximum
+  cronSchedule: process.env.CRON_SCHEDULE || '*/10 * * * *', // Fallback if randomInterval is explicitly false
   repoDir: path.resolve(process.cwd(), process.env.REPO_DIR || './repo'),
   logFileName: process.env.LOG_FILE_NAME || 'activity-log.txt',
   runOnStartup: process.env.RUN_ON_STARTUP === 'true' || process.env.RUN_ON_STARTUP === undefined,
