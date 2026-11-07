@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import cron from 'node-cron';
 import { config } from './config.js';
 import { GitService } from './gitService.js';
@@ -10,6 +12,44 @@ export class HeartbeatBot {
     this.randomTimer = null;
     this.isExecuting = false;
     this.isShuttingDown = false;
+    this.lockFile = path.resolve(process.cwd(), 'bot.pid');
+  }
+
+  /**
+   * Prevents multiple instances from running concurrently
+   */
+  acquireLock() {
+    if (fs.existsSync(this.lockFile)) {
+      try {
+        const rawPid = fs.readFileSync(this.lockFile, 'utf-8').trim();
+        const pid = parseInt(rawPid, 10);
+        if (pid && !isNaN(pid)) {
+          try {
+            // Check if process is alive
+            process.kill(pid, 0);
+            logger.warn(`Another instance of the bot is already active (PID: ${pid}). Exiting duplicate process.`);
+            process.exit(0);
+          } catch {
+            // Process does not exist; lock is stale
+          }
+        }
+      } catch {}
+    }
+    fs.writeFileSync(this.lockFile, String(process.pid), 'utf-8');
+  }
+
+  /**
+   * Releases lock on exit
+   */
+  releaseLock() {
+    try {
+      if (fs.existsSync(this.lockFile)) {
+        const rawPid = fs.readFileSync(this.lockFile, 'utf-8').trim();
+        if (parseInt(rawPid, 10) === process.pid) {
+          fs.unlinkSync(this.lockFile);
+        }
+      }
+    } catch {}
   }
 
   /**
@@ -69,6 +109,17 @@ export class HeartbeatBot {
     // 1. Validate configuration
     config.validate();
 
+    // 2. Handle runOnce mode (useful for manual testing or CI verification)
+    if (config.runOnce) {
+      logger.info('RUN_ONCE mode detected. Executing single cycle and exiting...');
+      await this.gitService.initialize();
+      await this.runCycle();
+      process.exit(0);
+    }
+
+    // 3. Acquire singleton lock
+    this.acquireLock();
+
     logger.info(`Target Repository : ${config.repoUrl}`);
     logger.info(`Target Branch     : ${config.branchName}`);
     logger.info(`Commit Author     : ${config.commitUsername} <${config.commitEmail}>`);
@@ -80,23 +131,16 @@ export class HeartbeatBot {
     logger.info(`Working Directory : ${config.repoDir}`);
     logger.info(`Max Retries       : ${config.maxRetries}`);
 
-    // 2. Initialize Git repository
+    // 4. Initialize Git repository
     await this.gitService.initialize();
 
-    // 3. Handle runOnce mode (useful for manual testing or CI verification)
-    if (config.runOnce) {
-      logger.info('RUN_ONCE mode detected. Executing single cycle and exiting...');
-      await this.runCycle();
-      process.exit(0);
-    }
-
-    // 4. Optionally run immediately on startup
+    // 5. Optionally run immediately on startup
     if (config.runOnStartup) {
       logger.info('Initial heartbeat starting on boot...');
       await this.runCycle();
     }
 
-    // 5. Setup schedule (Randomized natural intervals or fixed cron)
+    // 6. Setup schedule (Randomized natural intervals or fixed cron)
     if (config.randomInterval) {
       this.scheduleNextRandomRun();
     } else {
@@ -113,12 +157,12 @@ export class HeartbeatBot {
 
     logger.success('Heartbeat Bot is actively running in background.');
 
-    // 6. Register graceful shutdown handlers
+    // 7. Register graceful shutdown handlers
     this.setupGracefulShutdown();
   }
 
   /**
-   * Handles graceful shutdown on SIGINT / SIGTERM
+   * Handles graceful shutdown on SIGINT / SIGTERM / EXIT
    */
   setupGracefulShutdown() {
     const handleShutdown = async (signal) => {
@@ -144,11 +188,13 @@ export class HeartbeatBot {
         }
       }
 
+      this.releaseLock();
       logger.success('Heartbeat Bot shutdown complete.');
       process.exit(0);
     };
 
     process.on('SIGINT', () => handleShutdown('SIGINT'));
     process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+    process.on('exit', () => this.releaseLock());
   }
 }
