@@ -5,191 +5,189 @@ import { config } from './config.js';
 import { GitService } from './gitService.js';
 import { logger } from './logger.js';
 
+const TICK_MS = 15 * 1000; // scheduler tick; compares wall-clock so sleep/wake never stalls it
+const LOCK_STALE_MS = 90 * 1000; // lock older than this is considered abandoned
+const FAILURE_RETRY_MS = 2 * 60 * 1000; // retry sooner after a failed cycle
+
 export class HeartbeatBot {
   constructor() {
     this.gitService = new GitService();
     this.cronTask = null;
-    this.randomTimer = null;
+    this.tickTimer = null;
+    this.nextRunAt = 0;
     this.isExecuting = false;
     this.isShuttingDown = false;
     this.lockFile = path.resolve(process.cwd(), 'bot.pid');
   }
 
   /**
-   * Prevents multiple instances from running concurrently
+   * Singleton lock. A lock is only honoured if its PID is alive AND it was
+   * refreshed recently, so a stale file (or a reused PID after reboot) can
+   * never block the bot from starting.
    */
   acquireLock() {
-    if (fs.existsSync(this.lockFile)) {
-      try {
-        const rawPid = fs.readFileSync(this.lockFile, 'utf-8').trim();
-        const pid = parseInt(rawPid, 10);
-        if (pid && !isNaN(pid)) {
+    try {
+      if (fs.existsSync(this.lockFile)) {
+        const age = Date.now() - fs.statSync(this.lockFile).mtimeMs;
+        const pid = parseInt(fs.readFileSync(this.lockFile, 'utf-8').trim(), 10);
+        if (pid && pid !== process.pid && age < LOCK_STALE_MS) {
+          let alive = true;
           try {
-            // Check if process is alive
             process.kill(pid, 0);
-            logger.warn(`Another instance of the bot is already active (PID: ${pid}). Exiting duplicate process.`);
-            process.exit(0);
           } catch {
-            // Process does not exist; lock is stale
+            alive = false;
+          }
+          if (alive) {
+            logger.warn(`Another instance is already running (PID ${pid}). Exiting duplicate.`);
+            process.exit(0);
           }
         }
-      } catch {}
-    }
+      }
+    } catch {}
     fs.writeFileSync(this.lockFile, String(process.pid), 'utf-8');
   }
 
-  /**
-   * Releases lock on exit
-   */
+  touchLock() {
+    try {
+      const now = new Date();
+      fs.utimesSync(this.lockFile, now, now);
+    } catch {
+      try {
+        fs.writeFileSync(this.lockFile, String(process.pid), 'utf-8');
+      } catch {}
+    }
+  }
+
   releaseLock() {
     try {
-      if (fs.existsSync(this.lockFile)) {
-        const rawPid = fs.readFileSync(this.lockFile, 'utf-8').trim();
-        if (parseInt(rawPid, 10) === process.pid) {
-          fs.unlinkSync(this.lockFile);
-        }
+      if (fs.existsSync(this.lockFile) && parseInt(fs.readFileSync(this.lockFile, 'utf-8').trim(), 10) === process.pid) {
+        fs.unlinkSync(this.lockFile);
       }
     } catch {}
   }
 
   /**
-   * Safe execution wrapper preventing overlapping cycles
+   * Safe execution wrapper preventing overlapping cycles.
+   * @returns {Promise<boolean>} true if the cycle succeeded
    */
   async runCycle() {
-    if (this.isShuttingDown) {
-      logger.warn('Bot is shutting down. Skipping scheduled cycle.');
-      return;
-    }
-
+    if (this.isShuttingDown) return true;
     if (this.isExecuting) {
-      logger.warn('Previous heartbeat cycle is still running. Skipping to prevent race conditions.');
-      return;
+      logger.warn('Previous heartbeat cycle is still running. Skipping.');
+      return true;
     }
 
     this.isExecuting = true;
     try {
-      await this.gitService.executeHeartbeatCycle();
+      const result = await this.gitService.executeHeartbeatCycle();
+      return Boolean(result && result.success);
     } catch (err) {
       logger.error('Unhandled error during heartbeat execution:', err);
+      return false;
     } finally {
       this.isExecuting = false;
     }
   }
 
-  /**
-   * Schedule the next cycle using randomized human-like intervals
-   */
-  scheduleNextRandomRun() {
-    if (this.isShuttingDown) return;
-
-    const min = Math.max(1, config.minIntervalMinutes);
-    const max = Math.max(min, config.maxIntervalMinutes);
-    const randomMinutes = Math.floor(Math.random() * (max - min + 1)) + min;
-    const delayMs = randomMinutes * 60 * 1000;
-    const nextTime = new Date(Date.now() + delayMs);
-
-    logger.info(
-      `🎲 Randomized schedule: Next commit in ${randomMinutes} mins (around ${nextTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
-    );
-
-    this.randomTimer = setTimeout(async () => {
-      await this.runCycle();
-      this.scheduleNextRandomRun();
-    }, delayMs);
+  scheduleNext(afterFailure = false) {
+    let delayMs;
+    if (afterFailure) {
+      delayMs = FAILURE_RETRY_MS;
+      logger.warn(`Cycle failed. Retrying in ${delayMs / 60000} mins.`);
+    } else {
+      const min = Math.max(1, config.minIntervalMinutes);
+      const max = Math.max(min, config.maxIntervalMinutes);
+      const minutes = min + Math.random() * (max - min);
+      delayMs = Math.round(minutes * 60 * 1000);
+      logger.info(`Next commit in ${(delayMs / 60000).toFixed(1)} mins (around ${new Date(Date.now() + delayMs).toLocaleTimeString()})`);
+    }
+    this.nextRunAt = Date.now() + delayMs;
   }
 
   /**
-   * Starts the bot daemon
+   * Wall-clock tick loop. Unlike a long setTimeout, this recovers immediately
+   * after the PC wakes from sleep: the first tick after wake sees the run is
+   * overdue and fires it.
    */
+  startTickLoop() {
+    this.tickTimer = setInterval(async () => {
+      this.touchLock();
+      if (this.isShuttingDown || this.isExecuting) return;
+      if (Date.now() >= this.nextRunAt) {
+        const ok = await this.runCycle();
+        this.scheduleNext(!ok);
+      }
+    }, TICK_MS);
+  }
+
   async start() {
     logger.info('====================================================');
     logger.info('   GitHub Heartbeat Bot Daemon Starting Up');
     logger.info('====================================================');
 
-    // 1. Validate configuration
     config.validate();
 
-    // 2. Handle runOnce mode (useful for manual testing or CI verification)
     if (config.runOnce) {
-      logger.info('RUN_ONCE mode detected. Executing single cycle and exiting...');
+      logger.info('RUN_ONCE mode: executing single cycle and exiting...');
       await this.gitService.initialize();
-      await this.runCycle();
-      process.exit(0);
+      const ok = await this.runCycle();
+      process.exit(ok ? 0 : 1);
     }
 
-    // 3. Acquire singleton lock
     this.acquireLock();
 
     logger.info(`Target Repository : ${config.repoUrl}`);
     logger.info(`Target Branch     : ${config.branchName}`);
     logger.info(`Commit Author     : ${config.commitUsername} <${config.commitEmail}>`);
-    if (config.randomInterval) {
-      logger.info(`Timing Mode       : Randomized (${config.minIntervalMinutes} - ${config.maxIntervalMinutes} mins for natural commit activity)`);
-    } else {
-      logger.info(`Timing Mode       : Fixed Cron [${config.cronSchedule}]`);
+    logger.info(
+      config.randomInterval
+        ? `Timing Mode       : every ${config.minIntervalMinutes}-${config.maxIntervalMinutes} mins`
+        : `Timing Mode       : fixed cron [${config.cronSchedule}]`
+    );
+
+    // Retry initialisation (network may not be up yet right after boot/login)
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.gitService.initialize();
+        break;
+      } catch (err) {
+        logger.error(`Init failed (attempt ${attempt}). Retrying in 30s.`, err);
+        await new Promise((r) => setTimeout(r, 30000));
+        this.touchLock();
+      }
     }
-    logger.info(`Working Directory : ${config.repoDir}`);
-    logger.info(`Max Retries       : ${config.maxRetries}`);
 
-    // 4. Initialize Git repository
-    await this.gitService.initialize();
-
-    // 5. Optionally run immediately on startup
     if (config.runOnStartup) {
-      logger.info('Initial heartbeat starting on boot...');
+      logger.info('Initial heartbeat on startup...');
       await this.runCycle();
     }
 
-    // 6. Setup schedule (Randomized natural intervals or fixed cron)
     if (config.randomInterval) {
-      this.scheduleNextRandomRun();
+      this.scheduleNext();
+      this.startTickLoop();
     } else {
       if (!cron.validate(config.cronSchedule)) {
-        throw new Error(`Invalid cron expression: "${config.cronSchedule}". Expected format: "*/10 * * * *"`);
+        throw new Error(`Invalid cron expression: "${config.cronSchedule}"`);
       }
-
-      logger.info(`Registering fixed cron schedule: [${config.cronSchedule}]`);
-      this.cronTask = cron.schedule(config.cronSchedule, async () => {
-        logger.info('Cron schedule triggered.');
-        await this.runCycle();
-      });
+      this.cronTask = cron.schedule(config.cronSchedule, () => this.runCycle());
+      this.tickTimer = setInterval(() => this.touchLock(), TICK_MS);
     }
 
-    logger.success('Heartbeat Bot is actively running in background.');
-
-    // 7. Register graceful shutdown handlers
+    logger.success('Heartbeat Bot is running.');
     this.setupGracefulShutdown();
   }
 
-  /**
-   * Handles graceful shutdown on SIGINT / SIGTERM / EXIT
-   */
   setupGracefulShutdown() {
     const handleShutdown = async (signal) => {
-      logger.info(`Received ${signal}. Initiating graceful shutdown...`);
+      logger.info(`Received ${signal}. Shutting down...`);
       this.isShuttingDown = true;
+      if (this.tickTimer) clearInterval(this.tickTimer);
+      if (this.cronTask) this.cronTask.stop();
 
-      if (this.randomTimer) {
-        clearTimeout(this.randomTimer);
-        this.randomTimer = null;
+      for (let i = 0; this.isExecuting && i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
       }
-
-      if (this.cronTask) {
-        this.cronTask.stop();
-        logger.info('Cron scheduler stopped.');
-      }
-
-      if (this.isExecuting) {
-        logger.info('Waiting for active heartbeat cycle to complete...');
-        let waitCount = 0;
-        while (this.isExecuting && waitCount < 30) {
-          await new Promise((r) => setTimeout(r, 1000));
-          waitCount++;
-        }
-      }
-
       this.releaseLock();
-      logger.success('Heartbeat Bot shutdown complete.');
       process.exit(0);
     };
 
